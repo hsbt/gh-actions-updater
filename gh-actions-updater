@@ -4,6 +4,7 @@
 require "optparse"
 require "yaml"
 require "json"
+require "set"
 
 class GitHubActionsUpdater
   DEFAULT_WORKFLOW_DIR = ".github/workflows"
@@ -196,7 +197,7 @@ class GitHubActionsUpdater
         end
       end
     rescue => e
-      puts "Error processing #{file}: #{e.message}" if verbose
+      puts "Error processing #{file}: #{e.message}" if @verbose
     end
 
     # Convert the Sets to Arrays
@@ -226,7 +227,7 @@ class GitHubActionsUpdater
         end
       end
     rescue => e
-      puts "Error processing #{file}: #{e.message}" if verbose
+      puts "Error processing #{file}: #{e.message}" if @verbose
     end
 
     # Convert the Sets to Arrays
@@ -334,7 +335,6 @@ class GitHubActionsUpdater
 
     @workflow_files.each do |file|
       content = File.read(file)
-      content.dup
       file_modified = false
 
       hash_based_actions.each do |action, versions|
@@ -386,7 +386,6 @@ class GitHubActionsUpdater
 
     @workflow_files.each do |file|
       content = File.read(file)
-      original_content = content.dup
       file_modified = false
 
       tag_based_actions.each do |action, versions|
