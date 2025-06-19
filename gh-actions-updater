@@ -8,12 +8,10 @@ gemfile do
   source "https://rubygems.org"
   gem "base64"
   gem "octokit", "~> 6.0", require: true
-  gem "terminal-table", "~> 3.0"
 end
 
 require "optparse"
 require "yaml"
-require "pathname"
 
 class GitHubActionsUpdater
   DEFAULT_WORKFLOW_DIR = ".github/workflows"
@@ -213,18 +211,8 @@ class GitHubActionsUpdater
     if files_changed > 0
       puts "\nSuccessfully updated #{files_changed} workflow file(s)"
 
-      if defined?(Terminal::Table)
-        rows = actions_updated.map { |action, count| [action, count] }
-        table = Terminal::Table.new(
-          title: "Actions Updated",
-          headings: ["Action", "Occurrences"],
-          rows: rows
-        )
-        puts table
-      else
-        actions_updated.each do |action, count|
-          puts "  - #{action}: #{count} occurrence(s)"
-        end
+      actions_updated.each do |action, count|
+        puts "  - #{action}: #{count} occurrence(s)"
       end
     else
       puts "\nNo files were updated" + (dry_run ? " (dry run)" : "")
