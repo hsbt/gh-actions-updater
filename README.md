@@ -28,24 +28,12 @@ gh actions-updater
 
 - `-f, --file FILE`: Specify workflow file(s) to update (can be used multiple times)
 - `-a, --action ACTION`: Target specific action(s) to update (can be used multiple times)
-- `--list-actions`: List all actions used in workflow files
-- `-l, --list`: List available workflow files
 - `-n, --dry-run`: Show what would be done without making changes
 - `-v, --verbose`: Show more detailed output
 - `-t, --token TOKEN`: GitHub API token to avoid rate limits
 - `-h, --help`: Show help message
 
 ### Examples
-
-List all workflow files:
-```bash
-gh actions-updater --list
-```
-
-List all actions in workflow files:
-```bash
-gh actions-updater --list-actions
-```
 
 Update specific workflow file:
 ```bash

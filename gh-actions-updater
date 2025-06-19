@@ -230,73 +230,6 @@ class GitHubActionsUpdater
       puts "\nNo files were updated" + (dry_run ? " (dry run)" : "")
     end
   end
-
-  def list_workflow_files
-    workflow_dir = File.join(Dir.pwd, DEFAULT_WORKFLOW_DIR)
-    unless Dir.exist?(workflow_dir)
-      puts "Workflow directory not found at #{workflow_dir}"
-      return []
-    end
-
-    files = Dir.glob(File.join(workflow_dir, "*.{yml,yaml}")).sort
-
-    if defined?(Terminal::Table)
-      rows = files.map.with_index do |file, index|
-        relative_path = Pathname.new(file).relative_path_from(Pathname.new(Dir.pwd))
-        [index + 1, relative_path.to_s]
-      end
-
-      table = Terminal::Table.new(
-        title: "Available Workflow Files",
-        headings: ["#", "Path"],
-        rows: rows
-      )
-      puts table
-    else
-      puts "Available workflow files:"
-      files.each_with_index do |file, index|
-        relative_path = Pathname.new(file).relative_path_from(Pathname.new(Dir.pwd))
-        puts "  #{index + 1}. #{relative_path}"
-      end
-    end
-
-    files
-  end
-  
-  def list_actions_in_workflows
-    actions = {}
-    
-    @workflow_files.each do |file|
-      content = File.read(file)
-      
-      content.scan(/uses:\s+([^@\s]+)@([^\s#]+)(?:\s+#\s+(.+))?/) do |match|
-        action = match[0]
-        version = match[1]
-        
-        actions[action] ||= Set.new
-        actions[action] << version
-      end
-    rescue => e
-      puts "Error processing #{file}: #{e.message}" if verbose
-    end
-    
-    if defined?(Terminal::Table)
-      rows = actions.map { |action, versions| [action, versions.to_a.join(", ")] }
-      table = Terminal::Table.new(
-        title: "GitHub Actions in Workflow Files",
-        headings: ["Action", "Versions"],
-        rows: rows
-      )
-      puts table
-    else
-      puts "GitHub Actions in workflow files:"
-      actions.each do |action, versions|
-        puts "  - #{action}: #{versions.to_a.join(", ")}"
-      end
-    end
-    
-    actions.keys
-  end
 end
 
 options = {}
@@ -313,14 +246,6 @@ OptionParser.new do |opts|
   opts.on("-a", "--action ACTION", "Target specific action(s) to update (can be used multiple times, e.g. 'actions/checkout')") do |action|
     options[:target_actions] ||= []
     options[:target_actions] << action
-  end
-  
-  opts.on("--list-actions", "List all actions used in workflow files") do
-    options[:list_actions] = true
-  end
-
-  opts.on("-l", "--list", "List available workflow files") do
-    options[:list_files] = true
   end
 
   opts.on("-n", "--dry-run", "Show what would be done without making changes") do
@@ -343,10 +268,4 @@ end.parse!
 
 updater = GitHubActionsUpdater.new(options)
 
-if options[:list_files]
-  updater.list_workflow_files
-elsif options[:list_actions]
-  updater.list_actions_in_workflows
-else
-  updater.run
-end
+updater.run
