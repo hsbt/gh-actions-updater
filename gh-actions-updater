@@ -16,11 +16,12 @@ require "yaml"
 class GitHubActionsUpdater
   DEFAULT_WORKFLOW_DIR = ".github/workflows"
 
-  attr_reader :dry_run, :verbose, :workflow_files, :target_actions
+  attr_reader :dry_run, :verbose, :workflow_files, :target_actions, :migrate
 
   def initialize(options = {})
     @dry_run = options[:dry_run]
     @verbose = options[:verbose]
+    @migrate = options[:migrate]
     @workflow_files = options[:workflow_files] || []
     @target_actions = options[:target_actions] || []
     @latest_versions_cache = {}
@@ -56,6 +57,14 @@ class GitHubActionsUpdater
     # Validate all specified files exist
     validate_workflow_files
 
+    if @migrate
+      migrate_tag_to_hash_versions
+    else
+      update_hash_based_actions
+    end
+  end
+
+  def update_hash_based_actions
     puts "Checking GitHub Actions in #{@workflow_files.size} workflow file(s)..."
 
     # Find all actions with hash-based versions in specified workflow files
@@ -88,6 +97,44 @@ class GitHubActionsUpdater
 
     # Update the workflow files
     update_workflow_files(hash_based_actions)
+  end
+
+  def migrate_tag_to_hash_versions
+    puts "Converting tag-based versions to hash-based versions in #{@workflow_files.size} workflow file(s)..."
+
+    # Find all actions with tag-based versions in specified workflow files
+    tag_based_actions = find_tag_based_actions
+
+    if tag_based_actions.empty?
+      puts "No GitHub Actions with tag-based versions found in specified workflow files."
+      return
+    end
+
+    puts "Found #{tag_based_actions.size} GitHub Actions with tag-based versions:"
+    tag_based_actions.each do |action, versions|
+      plural = (versions.size > 1) ? "versions" : "version"
+      puts "  - #{action} (#{versions.size} tag-based #{plural})"
+    end
+
+    # Fetch hash versions for all identified actions
+    puts "\nFetching hash versions for these actions..."
+    action_repos = tag_based_actions.keys
+
+    action_repos.each do |action|
+      tag_based_actions[action].each do |tag_version|
+        hash_version = fetch_hash_for_tag(action, tag_version)
+        if hash_version
+          cache_key = "#{action}@#{tag_version}"
+          @latest_versions_cache[cache_key] = hash_version
+          puts "Hash version of #{action}@#{tag_version}: #{hash_version}"
+        else
+          puts "Warning: Could not determine the hash version of #{action}@#{tag_version}"
+        end
+      end
+    end
+
+    # Update the workflow files
+    migrate_workflow_files(tag_based_actions)
   end
 
   def find_all_workflow_files
@@ -139,6 +186,36 @@ class GitHubActionsUpdater
     hash_based_actions.transform_values(&:to_a)
   end
 
+  def find_tag_based_actions
+    tag_based_actions = {}
+    sha_pattern = /^[0-9a-f]{40}$/
+
+    @workflow_files.each do |file|
+      content = File.read(file)
+
+      # Find all 'uses: action@tag' patterns (not SHA hashes)
+      content.scan(/uses:\s+([^@\s]+)@([^\s#]+)(?:\s+#\s+(.+))?/) do |match|
+        action = match[0]
+        version = match[1]
+        comment = match[2]
+
+        # Skip if target actions are specified and this action is not included
+        next if @target_actions.any? && !@target_actions.include?(action)
+
+        # Check if it's NOT a SHA hash (i.e., it's a tag)
+        unless version&.match?(sha_pattern)
+          tag_based_actions[action] ||= Set.new
+          tag_based_actions[action] << version
+        end
+      end
+    rescue => e
+      puts "Error processing #{file}: #{e.message}" if verbose
+    end
+
+    # Convert the Sets to Arrays
+    tag_based_actions.transform_values(&:to_a)
+  end
+
   def fetch_latest_version(action_repo)
     return @latest_versions_cache[action_repo] if @latest_versions_cache.key?(action_repo)
 
@@ -163,6 +240,33 @@ class GitHubActionsUpdater
       nil
     rescue => e
       puts "Error fetching latest version for #{action_repo}: #{e.message}" if verbose
+      nil
+    end
+  end
+
+  def fetch_hash_for_tag(action_repo, tag)
+    puts "Fetching the hash version for #{action_repo}@#{tag}..." if verbose
+
+    begin
+      # Get the reference for this tag to find its SHA
+      tag_ref = @client.ref(action_repo, "tags/#{tag}")
+      if tag_ref&.object&.sha
+        latest_sha = tag_ref.object.sha
+        return "#{latest_sha} # #{tag}"
+      end
+
+      # If tag reference doesn't work, try getting the commit directly
+      commits = @client.commits(action_repo, sha: tag)
+      if commits&.first&.sha
+        return "#{commits.first.sha} # #{tag}"
+      end
+
+      nil
+    rescue Octokit::Error => e
+      puts "GitHub API error for #{action_repo}@#{tag}: #{e.message}" if verbose
+      nil
+    rescue => e
+      puts "Error fetching hash version for #{action_repo}@#{tag}: #{e.message}" if verbose
       nil
     end
   end
@@ -218,6 +322,59 @@ class GitHubActionsUpdater
       puts "\nNo files were updated" + (dry_run ? " (dry run)" : "")
     end
   end
+
+  def migrate_workflow_files(tag_based_actions)
+    files_changed = 0
+    actions_migrated = Hash.new(0)
+
+    @workflow_files.each do |file|
+      content = File.read(file)
+      original_content = content.dup
+      file_modified = false
+
+      tag_based_actions.each do |action, versions|
+        versions.each do |tag_version|
+          cache_key = "#{action}@#{tag_version}"
+          # Skip if we don't have a hash version for this action@tag
+          next unless @latest_versions_cache.key?(cache_key)
+
+          # Match the full 'uses: action@tag' pattern
+          old_pattern = "uses: #{action}@#{tag_version}"
+          new_version = @latest_versions_cache[cache_key]
+          new_pattern = "uses: #{action}@#{new_version}"
+
+          # Replace old version with new version
+          if content.include?(old_pattern)
+            content = content.gsub(old_pattern, new_pattern)
+            actions_migrated[action] += 1
+            file_modified = true
+          end
+        end
+      end
+
+      if file_modified
+        if dry_run
+          puts "Would migrate: #{file}"
+        else
+          File.write(file, content)
+          puts "Migrated: #{file}"
+          files_changed += 1
+        end
+      else
+        puts "No migrations needed for: #{file}"
+      end
+    end
+
+    if files_changed > 0
+      puts "\nSuccessfully migrated #{files_changed} workflow file(s)"
+
+      actions_migrated.each do |action, count|
+        puts "  - #{action}: #{count} occurrence(s)"
+      end
+    else
+      puts "\nNo files were migrated" + (dry_run ? " (dry run)" : "")
+    end
+  end
 end
 
 options = {}
@@ -234,6 +391,10 @@ OptionParser.new do |opts|
   opts.on("-a", "--action ACTION", "Target specific action(s) to update (can be used multiple times, e.g. 'actions/checkout')") do |action|
     options[:target_actions] ||= []
     options[:target_actions] << action
+  end
+
+  opts.on("-m", "--migrate", "Convert tag-based versions to hash-based versions") do
+    options[:migrate] = true
   end
 
   opts.on("-n", "--dry-run", "Show what would be done without making changes") do
