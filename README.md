@@ -37,7 +37,6 @@ gh actions-updater --migrate
 - `-m, --migrate`: Convert tag-based versions to hash-based versions
 - `-n, --dry-run`: Show what would be done without making changes
 - `-v, --verbose`: Show more detailed output
-- `-t, --token TOKEN`: GitHub API token to avoid rate limits
 - `-h, --help`: Show help message
 
 ### Examples
@@ -109,10 +108,13 @@ Note: For major version tags like `v1`, the tool automatically finds the latest 
 
 ## Authentication
 
-The extension uses GitHub CLI's authentication by default. You can also provide a GitHub token:
+The extension uses GitHub CLI's built-in authentication. Make sure you're authenticated with the GitHub CLI:
 
-- Set `GITHUB_TOKEN` or `GH_TOKEN` environment variable
-- Use the `-t, --token` option
+```bash
+gh auth login
+```
+
+The tool will automatically use your GitHub CLI credentials for API access.
 
 ## Requirements
 
