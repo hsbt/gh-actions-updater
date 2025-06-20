@@ -193,7 +193,8 @@ class GitHubActionsUpdater
         # Check if it's a SHA hash (40 hex characters)
         if version&.match?(sha_pattern)
           hash_based_actions[action] ||= Set.new
-          hash_based_actions[action] << "#{version}#{comment ? " # #{comment}" : ""}"
+          # Store only the hash version without the comment to avoid duplication
+          hash_based_actions[action] << version
         end
       end
     rescue => e
@@ -342,13 +343,14 @@ class GitHubActionsUpdater
           # Skip if we don't have a latest version for this action
           next unless @latest_versions_cache.key?(action)
 
-          # Match the full 'uses: action@oldversion' pattern
-          old_pattern = "uses: #{action}@#{old_version}"
+          # Create a regex pattern to match the old version with optional comment
+          # This will match: uses: action@oldversion or uses: action@oldversion # comment
+          old_pattern = /uses:\s+#{Regexp.escape(action)}@#{Regexp.escape(old_version)}(?:\s+#\s+[^\r\n]*)?/
           new_version = @latest_versions_cache[action]
           new_pattern = "uses: #{action}@#{new_version}"
 
-          # Replace old version with new version
-          if content.include?(old_pattern)
+          # Replace old version with new version, preserving the line structure
+          if content.match?(old_pattern)
             content = content.gsub(old_pattern, new_pattern)
             actions_updated[action] += 1
             file_modified = true
