@@ -185,7 +185,7 @@ class GitHubActionsUpdater
       content.scan(/uses:\s+([^@\s]+)@([^\s#]+)(?:\s+#\s+(.+))?/) do |match|
         action = match[0]
         version = match[1]
-        comment = match[2]
+        # match[2] contains comment but we don't use it
 
         # Skip if target actions are specified and this action is not included
         next if @target_actions.any? && !@target_actions.include?(action)
@@ -216,7 +216,7 @@ class GitHubActionsUpdater
       content.scan(/uses:\s+([^@\s]+)@([^\s#]+)(?:\s+#\s+(.+))?/) do |match|
         action = match[0]
         version = match[1]
-        comment = match[2]
+        # match[2] contains comment but we don't use it
 
         # Skip if target actions are specified and this action is not included
         next if @target_actions.any? && !@target_actions.include?(action)
