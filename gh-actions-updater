@@ -258,7 +258,7 @@ class GitHubActionsUpdater
     return nil unless tags&.is_a?(Array) && !tags.empty?
 
     # Filter out prerelease tags (beta, alpha, rc, dev, pre, etc.)
-    prerelease_pattern = /-(beta|alpha|rc|dev|pre|preview)(\d+)?$/i
+    prerelease_pattern = /(beta|alpha|rc|dev|pre|preview)/i
     stable_tags = tags.reject { |tag| tag["name"]&.match?(prerelease_pattern) }
 
     # If no stable tags found, fall back to all tags
