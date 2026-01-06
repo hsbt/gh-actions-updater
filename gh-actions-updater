@@ -4,7 +4,6 @@
 require "optparse"
 require "yaml"
 require "json"
-require "set"
 
 class GitHubActionsUpdater
   DEFAULT_WORKFLOW_DIR = ".github/workflows"
@@ -32,32 +31,32 @@ class GitHubActionsUpdater
   end
 
   def run_gh_command(args)
-    command = "gh #{args.join(' ')}"
+    command = "gh #{args.join(" ")}"
     puts "Running: #{command}" if @verbose
-    
+
     result = `#{command} 2>&1`
     exit_status = $?.exitstatus
-    
+
     if exit_status != 0
       puts "Error running gh command: #{command}" if @verbose
       puts "Error output: #{result}" if @verbose
       return nil
     end
-    
+
     result.strip
   end
 
   def run_gh_api(endpoint, params = {})
     args = ["api", endpoint]
-    
+
     # Add query parameters
     params.each do |key, value|
       args << "--field" << "#{key}=#{value}"
     end
-    
+
     result = run_gh_command(args)
     return nil unless result
-    
+
     begin
       JSON.parse(result)
     rescue JSON::ParserError => e
@@ -296,7 +295,7 @@ class GitHubActionsUpdater
     # Get all tags for the repository
     tags = run_gh_api("repos/#{action_repo}/tags")
     return nil unless tags&.is_a?(Array)
-    
+
     # Filter tags that match the major version pattern (v1.x.y)
     matching_tags = tags.select do |tag|
       tag["name"]&.match?(/^v#{major_version}\.\d+\.\d+$/)
