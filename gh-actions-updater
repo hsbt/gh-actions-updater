@@ -234,6 +234,20 @@ class GitHubActionsUpdater
     tag_based_actions.transform_values(&:to_a)
   end
 
+  def fetch_commit_sha_from_tag(action_repo, tag_sha, tag_type)
+    # If it's an annotated tag, we need to fetch the tag object to get the commit SHA
+    if tag_type == "tag"
+      tag_object = run_gh_api("repos/#{action_repo}/git/tags/#{tag_sha}")
+      if tag_object && tag_object["object"] && tag_object["object"]["sha"]
+        return tag_object["object"]["sha"]
+      end
+    else
+      # For lightweight tags, the SHA is the commit SHA
+      return tag_sha
+    end
+    nil
+  end
+
   def fetch_latest_version(action_repo)
     return @latest_versions_cache[action_repo] if @latest_versions_cache.key?(action_repo)
 
@@ -250,21 +264,8 @@ class GitHubActionsUpdater
     # Get the reference for this tag to find its SHA
     tag_ref = run_gh_api("repos/#{action_repo}/git/ref/tags/#{latest_tag}")
     if tag_ref && tag_ref["object"] && tag_ref["object"]["sha"]
-      tag_sha = tag_ref["object"]["sha"]
-      tag_type = tag_ref["object"]["type"]
-
-      # If it's an annotated tag, we need to fetch the tag object to get the commit SHA
-      if tag_type == "tag"
-        tag_object = run_gh_api("repos/#{action_repo}/git/tags/#{tag_sha}")
-        if tag_object && tag_object["object"] && tag_object["object"]["sha"]
-          latest_sha = tag_object["object"]["sha"]
-          return "#{latest_sha} # #{latest_tag}"
-        end
-      else
-        # For lightweight tags, the SHA is the commit SHA
-        latest_sha = tag_sha
-        return "#{latest_sha} # #{latest_tag}"
-      end
+      latest_sha = fetch_commit_sha_from_tag(action_repo, tag_ref["object"]["sha"], tag_ref["object"]["type"])
+      return "#{latest_sha} # #{latest_tag}" if latest_sha
     end
 
     # If we couldn't get the SHA, just return the tag
@@ -285,21 +286,8 @@ class GitHubActionsUpdater
     # Get the reference for this tag to find its SHA
     tag_ref = run_gh_api("repos/#{action_repo}/git/ref/tags/#{tag}")
     if tag_ref && tag_ref["object"] && tag_ref["object"]["sha"]
-      tag_sha = tag_ref["object"]["sha"]
-      tag_type = tag_ref["object"]["type"]
-
-      # If it's an annotated tag, we need to fetch the tag object to get the commit SHA
-      if tag_type == "tag"
-        tag_object = run_gh_api("repos/#{action_repo}/git/tags/#{tag_sha}")
-        if tag_object && tag_object["object"] && tag_object["object"]["sha"]
-          latest_sha = tag_object["object"]["sha"]
-          return "#{latest_sha} # #{tag}"
-        end
-      else
-        # For lightweight tags, the SHA is the commit SHA
-        latest_sha = tag_sha
-        return "#{latest_sha} # #{tag}"
-      end
+      latest_sha = fetch_commit_sha_from_tag(action_repo, tag_ref["object"]["sha"], tag_ref["object"]["type"])
+      return "#{latest_sha} # #{tag}" if latest_sha
     end
 
     # If tag reference doesn't work, try getting the commit directly
@@ -345,21 +333,8 @@ class GitHubActionsUpdater
     # Get the SHA for this tag
     tag_ref = run_gh_api("repos/#{action_repo}/git/ref/tags/#{latest_tag}")
     if tag_ref && tag_ref["object"] && tag_ref["object"]["sha"]
-      tag_sha = tag_ref["object"]["sha"]
-      tag_type = tag_ref["object"]["type"]
-
-      # If it's an annotated tag, we need to fetch the tag object to get the commit SHA
-      if tag_type == "tag"
-        tag_object = run_gh_api("repos/#{action_repo}/git/tags/#{tag_sha}")
-        if tag_object && tag_object["object"] && tag_object["object"]["sha"]
-          latest_sha = tag_object["object"]["sha"]
-          return "#{latest_sha} # #{latest_tag}"
-        end
-      else
-        # For lightweight tags, the SHA is the commit SHA
-        latest_sha = tag_sha
-        return "#{latest_sha} # #{latest_tag}"
-      end
+      latest_sha = fetch_commit_sha_from_tag(action_repo, tag_ref["object"]["sha"], tag_ref["object"]["type"])
+      return "#{latest_sha} # #{latest_tag}" if latest_sha
     end
 
     # Fallback: return just the tag if we can't get SHA
@@ -370,80 +345,42 @@ class GitHubActionsUpdater
   end
 
   def update_workflow_files(hash_based_actions)
-    files_changed = 0
-    actions_updated = Hash.new(0)
-
-    @workflow_files.each do |file|
-      content = File.read(file)
-      file_modified = false
-
-      hash_based_actions.each do |action, versions|
-        versions.each do |old_version|
-          # Skip if we don't have a latest version for this action
-          next unless @latest_versions_cache.key?(action)
-
-          # Create a regex pattern to match the old version with optional comment
-          # This will match: uses: action@oldversion or uses: action@oldversion # comment
-          old_pattern = /uses:\s+#{Regexp.escape(action)}@#{Regexp.escape(old_version)}(?:\s+#\s+[^\r\n]*)?/
-          new_version = @latest_versions_cache[action]
-          new_pattern = "uses: #{action}@#{new_version}"
-
-          # Replace old version with new version, preserving the line structure
-          if content.match?(old_pattern)
-            content = content.gsub(old_pattern, new_pattern)
-            actions_updated[action] += 1
-            file_modified = true
-          end
-        end
-      end
-
-      if file_modified
-        if dry_run
-          puts "Would update: #{file}"
-        else
-          File.write(file, content)
-          puts "Updated: #{file}"
-          files_changed += 1
-        end
-      else
-        puts "No updates needed for: #{file}"
-      end
-    end
-
-    if files_changed > 0
-      puts "\nSuccessfully updated #{files_changed} workflow file(s)"
-
-      actions_updated.each do |action, count|
-        puts "  - #{action}: #{count} occurrence(s)"
-      end
-    else
-      puts "\nNo files were updated" + (dry_run ? " (dry run)" : "")
-    end
+    update_files_in_workflow(hash_based_actions, "update", action_key: :action_only)
   end
 
   def migrate_workflow_files(tag_based_actions)
+    update_files_in_workflow(tag_based_actions, "migrate", action_key: :action_with_version)
+  end
+
+  def update_files_in_workflow(actions, operation_type, action_key:)
     files_changed = 0
-    actions_migrated = Hash.new(0)
+    actions_processed = Hash.new(0)
 
     @workflow_files.each do |file|
       content = File.read(file)
       file_modified = false
 
-      tag_based_actions.each do |action, versions|
-        versions.each do |tag_version|
-          cache_key = "#{action}@#{tag_version}"
-          # Skip if we don't have a hash version for this action@tag
+      actions.each do |action, versions|
+        versions.each do |version|
+          cache_key = action_key == :action_only ? action : "#{action}@#{version}"
+          # Skip if we don't have a version for this action
           next unless @latest_versions_cache.key?(cache_key)
 
-          # Match the full 'uses: action@tag' pattern
-          old_pattern = "uses: #{action}@#{tag_version}"
           new_version = @latest_versions_cache[cache_key]
+
+          # Create old and new patterns based on operation type
+          if action_key == :action_only
+            old_pattern = /uses:\s+#{Regexp.escape(action)}@#{Regexp.escape(version)}(?:\s+#\s+[^\r\n]*)?/
+          else
+            old_pattern = "uses: #{action}@#{version}"
+          end
+
           new_pattern = "uses: #{action}@#{new_version}"
 
           # Replace old version with new version
-          if content.include?(old_pattern)
+          if content.match?(old_pattern)
             content = content.gsub(old_pattern, new_pattern)
-            actions_migrated[action] += 1
+            actions_processed[action] += 1
             file_modified = true
           end
         end
@@ -451,25 +388,26 @@ class GitHubActionsUpdater
 
       if file_modified
         if dry_run
-          puts "Would migrate: #{file}"
+          puts "Would #{operation_type}: #{file}"
         else
           File.write(file, content)
-          puts "Migrated: #{file}"
+          puts "#{operation_type.capitalize}d: #{file}"
           files_changed += 1
         end
       else
-        puts "No migrations needed for: #{file}"
+        puts "No #{operation_type}s needed for: #{file}"
       end
     end
 
     if files_changed > 0
-      puts "\nSuccessfully migrated #{files_changed} workflow file(s)"
+      operation_past = operation_type == "update" ? "updated" : "migrated"
+      puts "\nSuccessfully #{operation_past} #{files_changed} workflow file(s)"
 
-      actions_migrated.each do |action, count|
+      actions_processed.each do |action, count|
         puts "  - #{action}: #{count} occurrence(s)"
       end
     else
-      puts "\nNo files were migrated" + (dry_run ? " (dry run)" : "")
+      puts "\nNo files were #{operation_type}d" + (dry_run ? " (dry run)" : "")
     end
   end
 end
