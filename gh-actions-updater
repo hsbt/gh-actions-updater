@@ -253,7 +253,25 @@ class GitHubActionsUpdater
 
     puts "Fetching the latest version of #{action_repo}..." if @verbose
 
-    # Get all tags
+    # Try to get the latest release first
+    latest_release = run_gh_api("repos/#{action_repo}/releases/latest")
+
+    if latest_release && latest_release["tag_name"]
+      puts "Using latest release: #{latest_release["tag_name"]}" if @verbose
+      latest_tag = latest_release["tag_name"]
+
+      # Get the reference for this tag to find its SHA
+      tag_ref = run_gh_api("repos/#{action_repo}/git/ref/tags/#{latest_tag}")
+      if tag_ref && tag_ref["object"] && tag_ref["object"]["sha"]
+        latest_sha = fetch_commit_sha_from_tag(action_repo, tag_ref["object"]["sha"], tag_ref["object"]["type"])
+        return "#{latest_sha} # #{latest_tag}" if latest_sha
+      end
+
+      return latest_tag
+    end
+
+    # If no releases found, fall back to tags
+    puts "No releases found, using tags..." if @verbose
     tags = run_gh_api("repos/#{action_repo}/tags")
     return nil unless tags&.is_a?(Array) && !tags.empty?
 
