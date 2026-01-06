@@ -250,8 +250,21 @@ class GitHubActionsUpdater
     # Get the reference for this tag to find its SHA
     tag_ref = run_gh_api("repos/#{action_repo}/git/ref/tags/#{latest_tag}")
     if tag_ref && tag_ref["object"] && tag_ref["object"]["sha"]
-      latest_sha = tag_ref["object"]["sha"]
-      return "#{latest_sha} # #{latest_tag}"
+      tag_sha = tag_ref["object"]["sha"]
+      tag_type = tag_ref["object"]["type"]
+
+      # If it's an annotated tag, we need to fetch the tag object to get the commit SHA
+      if tag_type == "tag"
+        tag_object = run_gh_api("repos/#{action_repo}/git/tags/#{tag_sha}")
+        if tag_object && tag_object["object"] && tag_object["object"]["sha"]
+          latest_sha = tag_object["object"]["sha"]
+          return "#{latest_sha} # #{latest_tag}"
+        end
+      else
+        # For lightweight tags, the SHA is the commit SHA
+        latest_sha = tag_sha
+        return "#{latest_sha} # #{latest_tag}"
+      end
     end
 
     # If we couldn't get the SHA, just return the tag
@@ -272,8 +285,21 @@ class GitHubActionsUpdater
     # Get the reference for this tag to find its SHA
     tag_ref = run_gh_api("repos/#{action_repo}/git/ref/tags/#{tag}")
     if tag_ref && tag_ref["object"] && tag_ref["object"]["sha"]
-      latest_sha = tag_ref["object"]["sha"]
-      return "#{latest_sha} # #{tag}"
+      tag_sha = tag_ref["object"]["sha"]
+      tag_type = tag_ref["object"]["type"]
+
+      # If it's an annotated tag, we need to fetch the tag object to get the commit SHA
+      if tag_type == "tag"
+        tag_object = run_gh_api("repos/#{action_repo}/git/tags/#{tag_sha}")
+        if tag_object && tag_object["object"] && tag_object["object"]["sha"]
+          latest_sha = tag_object["object"]["sha"]
+          return "#{latest_sha} # #{tag}"
+        end
+      else
+        # For lightweight tags, the SHA is the commit SHA
+        latest_sha = tag_sha
+        return "#{latest_sha} # #{tag}"
+      end
     end
 
     # If tag reference doesn't work, try getting the commit directly
@@ -319,8 +345,21 @@ class GitHubActionsUpdater
     # Get the SHA for this tag
     tag_ref = run_gh_api("repos/#{action_repo}/git/ref/tags/#{latest_tag}")
     if tag_ref && tag_ref["object"] && tag_ref["object"]["sha"]
-      latest_sha = tag_ref["object"]["sha"]
-      return "#{latest_sha} # #{latest_tag}"
+      tag_sha = tag_ref["object"]["sha"]
+      tag_type = tag_ref["object"]["type"]
+
+      # If it's an annotated tag, we need to fetch the tag object to get the commit SHA
+      if tag_type == "tag"
+        tag_object = run_gh_api("repos/#{action_repo}/git/tags/#{tag_sha}")
+        if tag_object && tag_object["object"] && tag_object["object"]["sha"]
+          latest_sha = tag_object["object"]["sha"]
+          return "#{latest_sha} # #{latest_tag}"
+        end
+      else
+        # For lightweight tags, the SHA is the commit SHA
+        latest_sha = tag_sha
+        return "#{latest_sha} # #{latest_tag}"
+      end
     end
 
     # Fallback: return just the tag if we can't get SHA
