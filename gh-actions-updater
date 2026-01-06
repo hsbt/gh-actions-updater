@@ -253,12 +253,21 @@ class GitHubActionsUpdater
 
     puts "Fetching the latest version of #{action_repo}..." if @verbose
 
-    # Try to get the latest release first
-    latest_release = run_gh_api("repos/#{action_repo}/releases/latest")
+    # Try to get all releases first
+    releases = run_gh_api("repos/#{action_repo}/releases")
 
-    if latest_release && latest_release["tag_name"]
-      puts "Using latest release: #{latest_release["tag_name"]}" if @verbose
+    if releases&.is_a?(Array) && !releases.empty?
+      # Filter out draft and prerelease releases
+      stable_releases = releases.reject { |r| r["draft"] || r["prerelease"] }
+
+      # If no stable releases found, fall back to all releases
+      releases_to_use = stable_releases.any? ? stable_releases : releases
+
+      # Get the latest release (first one in the list)
+      latest_release = releases_to_use.first
       latest_tag = latest_release["tag_name"]
+
+      puts "Using latest release: #{latest_tag}" if @verbose
 
       # Get the reference for this tag to find its SHA
       tag_ref = run_gh_api("repos/#{action_repo}/git/ref/tags/#{latest_tag}")
