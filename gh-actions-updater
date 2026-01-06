@@ -257,8 +257,15 @@ class GitHubActionsUpdater
     tags = run_gh_api("repos/#{action_repo}/tags")
     return nil unless tags&.is_a?(Array) && !tags.empty?
 
+    # Filter out prerelease tags (beta, alpha, rc, dev, pre, etc.)
+    prerelease_pattern = /-(beta|alpha|rc|dev|pre|preview)(\d+)?$/i
+    stable_tags = tags.reject { |tag| tag["name"]&.match?(prerelease_pattern) }
+
+    # If no stable tags found, fall back to all tags
+    tags_to_use = stable_tags.any? ? stable_tags : tags
+
     # Get the latest tag (first one in the list)
-    latest_tag = tags.first["name"]
+    latest_tag = tags_to_use.first["name"]
     return nil unless latest_tag
 
     # Get the reference for this tag to find its SHA
