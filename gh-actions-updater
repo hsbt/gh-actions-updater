@@ -17,6 +17,7 @@ class GitHubActionsUpdater
     @workflow_files = options[:workflow_files] || []
     @target_actions = options[:target_actions] || []
     @latest_versions_cache = {}
+    @action_to_repo_cache = {}
 
     # Check if gh command is available
     unless system("which gh > /dev/null 2>&1")
@@ -103,7 +104,9 @@ class GitHubActionsUpdater
     action_repos = hash_based_actions.keys
 
     action_repos.each do |action|
-      latest_version = fetch_latest_version(action)
+      repo = extract_repo_from_action(action)
+      @action_to_repo_cache[action] = repo
+      latest_version = fetch_latest_version(repo)
       if latest_version
         @latest_versions_cache[action] = latest_version
         puts "Latest version of #{action}: #{latest_version}"
@@ -138,8 +141,10 @@ class GitHubActionsUpdater
     action_repos = tag_based_actions.keys
 
     action_repos.each do |action|
+      repo = extract_repo_from_action(action)
+      @action_to_repo_cache[action] = repo
       tag_based_actions[action].each do |tag_version|
-        hash_version = fetch_hash_for_tag(action, tag_version)
+        hash_version = fetch_hash_for_tag(repo, tag_version)
         if hash_version
           cache_key = "#{action}@#{tag_version}"
           @latest_versions_cache[cache_key] = hash_version
@@ -170,6 +175,22 @@ class GitHubActionsUpdater
       puts "Error: The following workflow files do not exist:"
       invalid_files.each { |file| puts "  - #{file}" }
       exit 1
+    end
+  end
+
+  def extract_repo_from_action(action)
+    # Extract repository from action string
+    # Examples:
+    # "github/codeql-action/autobuild" -> "github/codeql-action"
+    # "actions/checkout" -> "actions/checkout"
+    # "owner/repo" -> "owner/repo"
+    parts = action.split('/')
+    if parts.length >= 3
+      # If it's owner/repo/subaction, return owner/repo
+      "#{parts[0]}/#{parts[1]}"
+    else
+      # If it's owner/repo, return as is
+      action
     end
   end
 
