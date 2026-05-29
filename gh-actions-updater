@@ -269,6 +269,18 @@ class GitHubActionsUpdater
     nil
   end
 
+  def version_sort_key(tag)
+    # Build a comparable key from a tag name so the highest semantic version wins.
+    # Releases are returned in created_at order, which is unreliable when backport
+    # releases (e.g. v3.1.0-node20) are published after newer major versions.
+    # Prerelease-style tags (anything with a "-" suffix) rank below their stable peers.
+    match = tag.to_s.match(/^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?([-+].*)?$/)
+    return [-1, -1, -1, -1] unless match
+
+    stable = match[4].to_s.start_with?("-") ? 0 : 1
+    [match[1].to_i, (match[2] || 0).to_i, (match[3] || 0).to_i, stable]
+  end
+
   def fetch_latest_version(action_repo)
     return @latest_versions_cache[action_repo] if @latest_versions_cache.key?(action_repo)
 
@@ -284,8 +296,8 @@ class GitHubActionsUpdater
       # If no stable releases found, fall back to all releases
       releases_to_use = stable_releases.any? ? stable_releases : releases
 
-      # Get the latest release (first one in the list)
-      latest_release = releases_to_use.first
+      # Get the latest release by semantic version, not by creation date
+      latest_release = releases_to_use.max_by { |r| version_sort_key(r["tag_name"]) }
       latest_tag = latest_release["tag_name"]
 
       puts "Using latest release: #{latest_tag}" if @verbose
@@ -312,8 +324,8 @@ class GitHubActionsUpdater
     # If no stable tags found, fall back to all tags
     tags_to_use = stable_tags.any? ? stable_tags : tags
 
-    # Get the latest tag (first one in the list)
-    latest_tag = tags_to_use.first["name"]
+    # Get the latest tag by semantic version, not by listing order
+    latest_tag = tags_to_use.max_by { |tag| version_sort_key(tag["name"]) }["name"]
     return nil unless latest_tag
 
     # Get the reference for this tag to find its SHA
@@ -425,16 +437,23 @@ class GitHubActionsUpdater
 
           # Create old and new patterns based on operation type
           if action_key == :action_only
-            old_pattern = /uses:\s+#{Regexp.escape(action)}@#{Regexp.escape(version)}(?:\s+#\s+[^\r\n]*)?/
+            old_pattern = /uses:\s+#{Regexp.escape(action)}@#{Regexp.escape(version)}([ \t]+#[^\r\n]*)?/
           else
             old_pattern = "uses: #{action}@#{version}"
           end
 
-          new_pattern = "uses: #{action}@#{new_version}"
-
           # Replace old version with new version
           if content.match?(old_pattern)
-            content = content.gsub(old_pattern, new_pattern)
+            if action_key == :action_only
+              content = content.gsub(old_pattern) do
+                # The first "# ..." is the version comment owned by this tool.
+                # Preserve any following directives (e.g. "# zizmor: ignore[...]").
+                extra_comment = $1.to_s[/#[^#]*(\s+#[^\r\n]*)/, 1].to_s
+                "uses: #{action}@#{new_version}#{extra_comment}"
+              end
+            else
+              content = content.gsub(old_pattern, "uses: #{action}@#{new_version}")
+            end
             actions_processed[action] += 1
             file_modified = true
           end
