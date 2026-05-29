@@ -4,272 +4,13 @@
 require "optparse"
 require "yaml"
 require "json"
+require "set"
 
-class GitHubActionsUpdater
-  DEFAULT_WORKFLOW_DIR = ".github/workflows"
+# Pure helpers for comparing version tags.
+module Semver
+  module_function
 
-  attr_reader :dry_run, :verbose, :workflow_files, :target_actions, :migrate
-
-  def initialize(options = {})
-    @dry_run = options[:dry_run]
-    @verbose = options[:verbose]
-    @migrate = options[:migrate]
-    @workflow_files = options[:workflow_files] || []
-    @target_actions = options[:target_actions] || []
-    @latest_versions_cache = {}
-    @action_to_repo_cache = {}
-
-    # Check if gh command is available
-    unless system("which gh > /dev/null 2>&1")
-      puts "Error: GitHub CLI (gh) is not installed or not in PATH"
-      exit 1
-    end
-
-    # If no workflow files specified, use all files in the default directory
-    if @workflow_files.empty?
-      @workflow_files = find_all_workflow_files
-    end
-  end
-
-  def run_gh_command(args)
-    command = "gh #{args.join(" ")}"
-    puts "Running: #{command}" if @verbose
-
-    result = `#{command} 2>&1`
-    exit_status = $?.exitstatus
-
-    if exit_status != 0
-      puts "Error running gh command: #{command}" if @verbose
-      puts "Error output: #{result}" if @verbose
-      return nil
-    end
-
-    result.strip
-  end
-
-  def run_gh_api(endpoint, params = {})
-    args = ["api", endpoint]
-
-    # Add query parameters
-    params.each do |key, value|
-      args << "--field" << "#{key}=#{value}"
-    end
-
-    result = run_gh_command(args)
-    return nil unless result
-
-    begin
-      JSON.parse(result)
-    rescue JSON::ParserError => e
-      puts "Error parsing JSON response: #{e.message}" if @verbose
-      nil
-    end
-  end
-
-  def run
-    if @workflow_files.empty?
-      puts "No workflow files found in #{DEFAULT_WORKFLOW_DIR} directory."
-      exit 1
-    end
-
-    # Validate all specified files exist
-    validate_workflow_files
-
-    if @migrate
-      migrate_tag_to_hash_versions
-    else
-      update_hash_based_actions
-    end
-  end
-
-  def update_hash_based_actions
-    puts "Checking GitHub Actions in #{@workflow_files.size} workflow file(s)..."
-
-    # Find all actions with hash-based versions in specified workflow files
-    hash_based_actions = find_hash_based_actions
-
-    if hash_based_actions.empty?
-      puts "No GitHub Actions with hash-based versions found in specified workflow files."
-      return
-    end
-
-    puts "Found #{hash_based_actions.size} GitHub Actions with hash-based versions:"
-    hash_based_actions.each do |action, versions|
-      plural = (versions.size > 1) ? "versions" : "version"
-      puts "  - #{action} (#{versions.size} hash-based #{plural})"
-    end
-
-    # Fetch latest versions for all identified actions
-    puts "\nFetching latest versions for these actions..."
-    action_repos = hash_based_actions.keys
-
-    action_repos.each do |action|
-      repo = extract_repo_from_action(action)
-      @action_to_repo_cache[action] = repo
-      latest_version = fetch_latest_version(repo)
-      if latest_version
-        @latest_versions_cache[action] = latest_version
-        puts "Latest version of #{action}: #{latest_version}"
-      else
-        puts "Warning: Could not determine the latest version of #{action}"
-      end
-    end
-
-    # Update the workflow files
-    update_workflow_files(hash_based_actions)
-  end
-
-  def migrate_tag_to_hash_versions
-    puts "Converting tag-based versions to hash-based versions in #{@workflow_files.size} workflow file(s)..."
-
-    # Find all actions with tag-based versions in specified workflow files
-    tag_based_actions = find_tag_based_actions
-
-    if tag_based_actions.empty?
-      puts "No GitHub Actions with tag-based versions found in specified workflow files."
-      return
-    end
-
-    puts "Found #{tag_based_actions.size} GitHub Actions with tag-based versions:"
-    tag_based_actions.each do |action, versions|
-      plural = (versions.size > 1) ? "versions" : "version"
-      puts "  - #{action} (#{versions.size} tag-based #{plural})"
-    end
-
-    # Fetch hash versions for all identified actions
-    puts "\nFetching hash versions for these actions..."
-    action_repos = tag_based_actions.keys
-
-    action_repos.each do |action|
-      repo = extract_repo_from_action(action)
-      @action_to_repo_cache[action] = repo
-      tag_based_actions[action].each do |tag_version|
-        hash_version = fetch_hash_for_tag(repo, tag_version)
-        if hash_version
-          cache_key = "#{action}@#{tag_version}"
-          @latest_versions_cache[cache_key] = hash_version
-          puts "Hash version of #{action}@#{tag_version}: #{hash_version}"
-        else
-          puts "Warning: Could not determine the hash version of #{action}@#{tag_version}"
-        end
-      end
-    end
-
-    # Update the workflow files
-    migrate_workflow_files(tag_based_actions)
-  end
-
-  def find_all_workflow_files
-    workflow_dir = File.join(Dir.pwd, DEFAULT_WORKFLOW_DIR)
-    unless Dir.exist?(workflow_dir)
-      puts "Workflow directory not found at #{workflow_dir}"
-      return []
-    end
-
-    Dir.glob(File.join(workflow_dir, "*.{yml,yaml}")).sort
-  end
-
-  def validate_workflow_files
-    invalid_files = @workflow_files.reject { |file| File.exist?(file) }
-    if invalid_files.any?
-      puts "Error: The following workflow files do not exist:"
-      invalid_files.each { |file| puts "  - #{file}" }
-      exit 1
-    end
-  end
-
-  def extract_repo_from_action(action)
-    # Extract repository from action string
-    # Examples:
-    # "github/codeql-action/autobuild" -> "github/codeql-action"
-    # "actions/checkout" -> "actions/checkout"
-    # "owner/repo" -> "owner/repo"
-    parts = action.split('/')
-    if parts.length >= 3
-      # If it's owner/repo/subaction, return owner/repo
-      "#{parts[0]}/#{parts[1]}"
-    else
-      # If it's owner/repo, return as is
-      action
-    end
-  end
-
-  def find_hash_based_actions
-    hash_based_actions = {}
-    sha_pattern = /^[0-9a-f]{40}$/
-
-    @workflow_files.each do |file|
-      content = File.read(file)
-
-      # Find all 'uses: action@hash' patterns
-      content.scan(/uses:\s+([^@\s]+)@([^\s#]+)(?:\s+#\s+(.+))?/) do |match|
-        action = match[0]
-        version = match[1]
-        # match[2] contains comment but we don't use it
-
-        # Skip if target actions are specified and this action is not included
-        next if @target_actions.any? && !@target_actions.include?(action)
-
-        # Check if it's a SHA hash (40 hex characters)
-        if version&.match?(sha_pattern)
-          hash_based_actions[action] ||= Set.new
-          # Store only the hash version without the comment to avoid duplication
-          hash_based_actions[action] << version
-        end
-      end
-    rescue => e
-      puts "Error processing #{file}: #{e.message}" if @verbose
-    end
-
-    # Convert the Sets to Arrays
-    hash_based_actions.transform_values(&:to_a)
-  end
-
-  def find_tag_based_actions
-    tag_based_actions = {}
-    sha_pattern = /^[0-9a-f]{40}$/
-
-    @workflow_files.each do |file|
-      content = File.read(file)
-
-      # Find all 'uses: action@tag' patterns (not SHA hashes)
-      content.scan(/uses:\s+([^@\s]+)@([^\s#]+)(?:\s+#\s+(.+))?/) do |match|
-        action = match[0]
-        version = match[1]
-        # match[2] contains comment but we don't use it
-
-        # Skip if target actions are specified and this action is not included
-        next if @target_actions.any? && !@target_actions.include?(action)
-
-        # Check if it's NOT a SHA hash (i.e., it's a tag)
-        unless version&.match?(sha_pattern)
-          tag_based_actions[action] ||= Set.new
-          tag_based_actions[action] << version
-        end
-      end
-    rescue => e
-      puts "Error processing #{file}: #{e.message}" if @verbose
-    end
-
-    # Convert the Sets to Arrays
-    tag_based_actions.transform_values(&:to_a)
-  end
-
-  def fetch_commit_sha_from_tag(action_repo, tag_sha, tag_type)
-    # If it's an annotated tag, we need to fetch the tag object to get the commit SHA
-    if tag_type == "tag"
-      tag_object = run_gh_api("repos/#{action_repo}/git/tags/#{tag_sha}")
-      if tag_object && tag_object["object"] && tag_object["object"]["sha"]
-        return tag_object["object"]["sha"]
-      end
-    else
-      # For lightweight tags, the SHA is the commit SHA
-      return tag_sha
-    end
-    nil
-  end
-
-  def version_sort_key(tag)
+  def sort_key(tag)
     # Build a comparable key from a tag name so the highest semantic version wins.
     # Releases are returned in created_at order, which is unreliable when backport
     # releases (e.g. v3.1.0-node20) are published after newer major versions.
@@ -280,246 +21,498 @@ class GitHubActionsUpdater
     stable = match[4].to_s.start_with?("-") ? 0 : 1
     [match[1].to_i, (match[2] || 0).to_i, (match[3] || 0).to_i, stable]
   end
+end
 
-  def fetch_latest_version(action_repo)
-    return @latest_versions_cache[action_repo] if @latest_versions_cache.key?(action_repo)
+# Pure helpers for interpreting an action reference string.
+module ActionRef
+  SHA_PATTERN = /\A[0-9a-f]{40}\z/
 
-    puts "Fetching the latest version of #{action_repo}..." if @verbose
+  module_function
 
-    # Try to get all releases first
-    releases = run_gh_api("repos/#{action_repo}/releases")
+  def repo(action)
+    # Extract repository from an action string.
+    # "github/codeql-action/autobuild" -> "github/codeql-action"
+    # "actions/checkout"               -> "actions/checkout"
+    parts = action.split("/")
+    parts.length >= 3 ? "#{parts[0]}/#{parts[1]}" : action
+  end
 
-    if releases&.is_a?(Array) && !releases.empty?
-      # Filter out draft and prerelease releases
-      stable_releases = releases.reject { |r| r["draft"] || r["prerelease"] }
+  def sha?(version)
+    version&.match?(SHA_PATTERN) || false
+  end
+end
 
-      # If no stable releases found, fall back to all releases
-      releases_to_use = stable_releases.any? ? stable_releases : releases
+# Scans workflow file content for `uses:` references. Operates on strings only,
+# so it can be exercised without touching the filesystem.
+class WorkflowScanner
+  USES_PATTERN = /uses:\s+([^@\s]+)@([^\s#]+)(?:\s+#\s+(.+))?/
 
-      # Get the latest release by semantic version, not by creation date
-      latest_release = releases_to_use.max_by { |r| version_sort_key(r["tag_name"]) }
-      latest_tag = latest_release["tag_name"]
+  def initialize(target_actions: [])
+    @target_actions = target_actions || []
+  end
 
-      puts "Using latest release: #{latest_tag}" if @verbose
+  def hash_based(content)
+    scan(content) { |version| ActionRef.sha?(version) }
+  end
 
-      # Get the reference for this tag to find its SHA
-      tag_ref = run_gh_api("repos/#{action_repo}/git/ref/tags/#{latest_tag}")
-      if tag_ref && tag_ref["object"] && tag_ref["object"]["sha"]
-        latest_sha = fetch_commit_sha_from_tag(action_repo, tag_ref["object"]["sha"], tag_ref["object"]["type"])
-        return "#{latest_sha} # #{latest_tag}" if latest_sha
+  def tag_based(content)
+    scan(content) { |version| !ActionRef.sha?(version) }
+  end
+
+  private
+
+  def scan(content)
+    result = {}
+    content.scan(USES_PATTERN) do |action, version, _comment|
+      next if @target_actions.any? && !@target_actions.include?(action)
+      next unless yield(version)
+
+      (result[action] ||= Set.new) << version
+    end
+    result.transform_values(&:to_a)
+  end
+end
+
+# Rewrites `uses:` references inside a content string. The resolution of the
+# replacement value is delegated to a block, keeping this a pure transformation.
+class WorkflowRewriter
+  # actions is { action => [versions] }. The block receives (action, version)
+  # and returns the replacement version string (or nil to skip).
+  # Returns [new_content, modified?, processed_counts].
+  def rewrite(content, actions, action_key:)
+    processed = Hash.new(0)
+    modified = false
+
+    actions.each do |action, versions|
+      versions.each do |version|
+        new_version = yield(action, version)
+        next unless new_version
+
+        if action_key == :action_only
+          old_pattern = /uses:\s+#{Regexp.escape(action)}@#{Regexp.escape(version)}([ \t]+#[^\r\n]*)?/
+        else
+          old_pattern = "uses: #{action}@#{version}"
+        end
+
+        next unless content.match?(old_pattern)
+
+        content =
+          if action_key == :action_only
+            content.gsub(old_pattern) do
+              # The first "# ..." is the version comment owned by this tool.
+              # Preserve any following directives (e.g. "# zizmor: ignore[...]").
+              extra_comment = $1.to_s[/#[^#]*(\s+#[^\r\n]*)/, 1].to_s
+              "uses: #{action}@#{new_version}#{extra_comment}"
+            end
+          else
+            content.gsub(old_pattern, "uses: #{action}@#{new_version}")
+          end
+
+        processed[action] += 1
+        modified = true
       end
-
-      return latest_tag
     end
 
-    # If no releases found, fall back to tags
-    puts "No releases found, using tags..." if @verbose
-    tags = run_gh_api("repos/#{action_repo}/tags")
-    return nil unless tags&.is_a?(Array) && !tags.empty?
+    [content, modified, processed]
+  end
+end
 
-    # Filter out prerelease tags (beta, alpha, rc, dev, pre, etc.)
-    prerelease_pattern = /(beta|alpha|rc|dev|pre|preview)/i
-    stable_tags = tags.reject { |tag| tag["name"]&.match?(prerelease_pattern) }
-
-    # If no stable tags found, fall back to all tags
-    tags_to_use = stable_tags.any? ? stable_tags : tags
-
-    # Get the latest tag by semantic version, not by listing order
-    latest_tag = tags_to_use.max_by { |tag| version_sort_key(tag["name"]) }["name"]
-    return nil unless latest_tag
-
-    # Get the reference for this tag to find its SHA
-    tag_ref = run_gh_api("repos/#{action_repo}/git/ref/tags/#{latest_tag}")
-    if tag_ref && tag_ref["object"] && tag_ref["object"]["sha"]
-      latest_sha = fetch_commit_sha_from_tag(action_repo, tag_ref["object"]["sha"], tag_ref["object"]["type"])
-      return "#{latest_sha} # #{latest_tag}" if latest_sha
-    end
-
-    # If we couldn't get the SHA, just return the tag
-    latest_tag
-  rescue => e
-    puts "Error fetching latest version for #{action_repo}: #{e.message}" if @verbose
-    nil
+# Thin wrapper around the `gh` CLI. The single seam through which all network
+# I/O flows, so tests inject a fake in its place.
+class GhClient
+  def initialize(verbose: false, out: $stdout)
+    @verbose = verbose
+    @out = out
   end
 
-  def fetch_hash_for_tag(action_repo, tag)
-    puts "Fetching the hash version for #{action_repo}@#{tag}..." if @verbose
-
-    # Check if it's a major version tag (like v1, v2, etc.)
-    if tag.match?(/^v\d+$/)
-      return fetch_latest_in_major_version(action_repo, tag)
-    end
-
-    # Get the reference for this tag to find its SHA
-    tag_ref = run_gh_api("repos/#{action_repo}/git/ref/tags/#{tag}")
-    if tag_ref && tag_ref["object"] && tag_ref["object"]["sha"]
-      latest_sha = fetch_commit_sha_from_tag(action_repo, tag_ref["object"]["sha"], tag_ref["object"]["type"])
-      return "#{latest_sha} # #{tag}" if latest_sha
-    end
-
-    # If tag reference doesn't work, try getting the commit directly
-    commits = run_gh_api("repos/#{action_repo}/commits/#{tag}")
-    if commits && commits["sha"]
-      return "#{commits["sha"]} # #{tag}"
-    end
-
-    nil
-  rescue => e
-    puts "Error fetching hash version for #{action_repo}@#{tag}: #{e.message}" if @verbose
-    nil
+  def available?
+    system("which gh > /dev/null 2>&1")
   end
 
-  def fetch_latest_in_major_version(action_repo, major_version_tag)
-    major_version = major_version_tag.match(/^v(\d+)$/)[1].to_i
-    puts "Finding latest tag in #{major_version_tag}.x series for #{action_repo}..." if @verbose
+  def run(args)
+    command = "gh #{args.join(" ")}"
+    @out.puts "Running: #{command}" if @verbose
 
-    # Get all tags for the repository
-    tags = run_gh_api("repos/#{action_repo}/tags")
-    return nil unless tags&.is_a?(Array)
+    result = `#{command} 2>&1`
+    exit_status = $?.exitstatus
 
-    # Filter tags that match the major version pattern (v1.x.y)
-    matching_tags = tags.select do |tag|
-      tag["name"]&.match?(/^v#{major_version}\.\d+\.\d+$/)
-    end
-
-    if matching_tags.empty?
-      puts "No tags found matching #{major_version_tag}.x.y pattern" if @verbose
+    if exit_status != 0
+      if @verbose
+        @out.puts "Error running gh command: #{command}"
+        @out.puts "Error output: #{result}"
+      end
       return nil
     end
 
-    # Sort by version and get the latest
-    latest_tag_obj = matching_tags.max_by do |tag|
-      version_parts = tag["name"]&.match(/^v(\d+)\.(\d+)\.(\d+)$/)
-      next [0, 0, 0] unless version_parts
-      [version_parts[1].to_i, version_parts[2].to_i, version_parts[3].to_i]
+    result.strip
+  end
+
+  def api(endpoint, params = {})
+    args = ["api", endpoint]
+    params.each { |key, value| args << "--field" << "#{key}=#{value}" }
+
+    result = run(args)
+    return nil unless result
+
+    begin
+      JSON.parse(result)
+    rescue JSON::ParserError => e
+      @out.puts "Error parsing JSON response: #{e.message}" if @verbose
+      nil
     end
+  end
+end
 
-    latest_tag = latest_tag_obj["name"]
-    puts "Found latest tag in #{major_version_tag}.x series: #{latest_tag}" if @verbose
+# Resolves version strings (latest release/tag, hash for a tag) for a repository
+# using an injected GhClient.
+class VersionResolver
+  def initialize(client, verbose: false, out: $stdout)
+    @client = client
+    @verbose = verbose
+    @out = out
+    @latest_cache = {}
+  end
 
-    # Get the SHA for this tag
-    tag_ref = run_gh_api("repos/#{action_repo}/git/ref/tags/#{latest_tag}")
-    if tag_ref && tag_ref["object"] && tag_ref["object"]["sha"]
-      latest_sha = fetch_commit_sha_from_tag(action_repo, tag_ref["object"]["sha"], tag_ref["object"]["type"])
-      return "#{latest_sha} # #{latest_tag}" if latest_sha
-    end
+  def latest_version(repo)
+    return @latest_cache[repo] if @latest_cache.key?(repo)
 
-    # Fallback: return just the tag if we can't get SHA
-    latest_tag
+    @latest_cache[repo] = resolve_latest_version(repo)
+  end
+
+  def hash_for_tag(repo, tag)
+    @out.puts "Fetching the hash version for #{repo}@#{tag}..." if @verbose
+
+    # Major version tags (v1, v2, ...) resolve to the latest tag in that series.
+    return latest_in_major(repo, tag) if tag.match?(/^v\d+$/)
+
+    result = sha_for_tag(repo, tag)
+    return result if result
+
+    # If the tag reference doesn't work, try getting the commit directly.
+    commit = @client.api("repos/#{repo}/commits/#{tag}")
+    return "#{commit["sha"]} # #{tag}" if commit && commit["sha"]
+
+    nil
   rescue => e
-    puts "Error fetching latest tag in #{major_version_tag}.x series for #{action_repo}: #{e.message}" if @verbose
+    @out.puts "Error fetching hash version for #{repo}@#{tag}: #{e.message}" if @verbose
     nil
   end
 
-  def update_workflow_files(hash_based_actions)
-    update_files_in_workflow(hash_based_actions, "update", action_key: :action_only)
+  private
+
+  def resolve_latest_version(repo)
+    @out.puts "Fetching the latest version of #{repo}..." if @verbose
+
+    # Try to get all releases first.
+    releases = @client.api("repos/#{repo}/releases")
+
+    if releases.is_a?(Array) && !releases.empty?
+      stable_releases = releases.reject { |r| r["draft"] || r["prerelease"] }
+      releases_to_use = stable_releases.any? ? stable_releases : releases
+
+      # Pick the latest release by semantic version, not by creation date.
+      latest_tag = releases_to_use.max_by { |r| Semver.sort_key(r["tag_name"]) }["tag_name"]
+      @out.puts "Using latest release: #{latest_tag}" if @verbose
+
+      return sha_for_tag(repo, latest_tag) || latest_tag
+    end
+
+    # If no releases found, fall back to tags.
+    @out.puts "No releases found, using tags..." if @verbose
+    tags = @client.api("repos/#{repo}/tags")
+    return nil unless tags.is_a?(Array) && !tags.empty?
+
+    # Filter out prerelease tags (beta, alpha, rc, dev, pre, etc.).
+    prerelease_pattern = /(beta|alpha|rc|dev|pre|preview)/i
+    stable_tags = tags.reject { |tag| tag["name"]&.match?(prerelease_pattern) }
+    tags_to_use = stable_tags.any? ? stable_tags : tags
+
+    # Pick the latest tag by semantic version, not by listing order.
+    latest_tag = tags_to_use.max_by { |tag| Semver.sort_key(tag["name"]) }["name"]
+    return nil unless latest_tag
+
+    sha_for_tag(repo, latest_tag) || latest_tag
+  rescue => e
+    @out.puts "Error fetching latest version for #{repo}: #{e.message}" if @verbose
+    nil
   end
 
-  def migrate_workflow_files(tag_based_actions)
-    update_files_in_workflow(tag_based_actions, "migrate", action_key: :action_with_version)
+  def latest_in_major(repo, major_version_tag)
+    major_version = major_version_tag.match(/^v(\d+)$/)[1].to_i
+    @out.puts "Finding latest tag in #{major_version_tag}.x series for #{repo}..." if @verbose
+
+    tags = @client.api("repos/#{repo}/tags")
+    return nil unless tags.is_a?(Array)
+
+    matching_tags = tags.select { |tag| tag["name"]&.match?(/^v#{major_version}\.\d+\.\d+$/) }
+    if matching_tags.empty?
+      @out.puts "No tags found matching #{major_version_tag}.x.y pattern" if @verbose
+      return nil
+    end
+
+    latest_tag = matching_tags.max_by do |tag|
+      parts = tag["name"]&.match(/^v(\d+)\.(\d+)\.(\d+)$/)
+      parts ? [parts[1].to_i, parts[2].to_i, parts[3].to_i] : [0, 0, 0]
+    end["name"]
+    @out.puts "Found latest tag in #{major_version_tag}.x series: #{latest_tag}" if @verbose
+
+    sha_for_tag(repo, latest_tag) || latest_tag
+  rescue => e
+    @out.puts "Error fetching latest tag in #{major_version_tag}.x series for #{repo}: #{e.message}" if @verbose
+    nil
   end
 
-  def update_files_in_workflow(actions, operation_type, action_key:)
+  # Returns "<commit_sha> # <tag>" for the given tag, or nil when it can't be resolved.
+  def sha_for_tag(repo, tag)
+    tag_ref = @client.api("repos/#{repo}/git/ref/tags/#{tag}")
+    return nil unless tag_ref && tag_ref["object"] && tag_ref["object"]["sha"]
+
+    sha = commit_sha(repo, tag_ref["object"]["sha"], tag_ref["object"]["type"])
+    sha ? "#{sha} # #{tag}" : nil
+  end
+
+  def commit_sha(repo, tag_sha, tag_type)
+    # Annotated tags point at a tag object; dereference it to the commit SHA.
+    if tag_type == "tag"
+      tag_object = @client.api("repos/#{repo}/git/tags/#{tag_sha}")
+      return tag_object["object"]["sha"] if tag_object && tag_object["object"] && tag_object["object"]["sha"]
+
+      nil
+    else
+      # Lightweight tags already point at the commit.
+      tag_sha
+    end
+  end
+end
+
+# Coordinates scanning, version resolution and rewriting across workflow files.
+class GitHubActionsUpdater
+  DEFAULT_WORKFLOW_DIR = ".github/workflows"
+
+  attr_reader :dry_run, :verbose, :workflow_files, :target_actions, :migrate
+
+  def initialize(options = {}, client: nil, scanner: nil, resolver: nil, rewriter: nil, out: $stdout)
+    @dry_run = options[:dry_run]
+    @verbose = options[:verbose]
+    @migrate = options[:migrate]
+    @workflow_files = options[:workflow_files] || []
+    @target_actions = options[:target_actions] || []
+    @out = out
+
+    @client = client || GhClient.new(verbose: @verbose, out: @out)
+    @scanner = scanner || WorkflowScanner.new(target_actions: @target_actions)
+    @resolver = resolver || VersionResolver.new(@client, verbose: @verbose, out: @out)
+    @rewriter = rewriter || WorkflowRewriter.new
+  end
+
+  def run
+    unless @client.available?
+      @out.puts "Error: GitHub CLI (gh) is not installed or not in PATH"
+      exit 1
+    end
+
+    @workflow_files = find_all_workflow_files if @workflow_files.empty?
+
+    if @workflow_files.empty?
+      @out.puts "No workflow files found in #{DEFAULT_WORKFLOW_DIR} directory."
+      exit 1
+    end
+
+    validate_workflow_files
+
+    if @migrate
+      migrate_tag_to_hash_versions
+    else
+      update_hash_based_actions
+    end
+  end
+
+  def update_hash_based_actions
+    @out.puts "Checking GitHub Actions in #{@workflow_files.size} workflow file(s)..."
+
+    actions = scan_files { |content| @scanner.hash_based(content) }
+
+    if actions.empty?
+      @out.puts "No GitHub Actions with hash-based versions found in specified workflow files."
+      return
+    end
+
+    @out.puts "Found #{actions.size} GitHub Actions with hash-based versions:"
+    actions.each do |action, versions|
+      plural = (versions.size > 1) ? "versions" : "version"
+      @out.puts "  - #{action} (#{versions.size} hash-based #{plural})"
+    end
+
+    @out.puts "\nFetching latest versions for these actions..."
+    new_versions = {}
+    actions.each_key do |action|
+      latest = @resolver.latest_version(ActionRef.repo(action))
+      if latest
+        new_versions[action] = latest
+        @out.puts "Latest version of #{action}: #{latest}"
+      else
+        @out.puts "Warning: Could not determine the latest version of #{action}"
+      end
+    end
+
+    apply_updates(actions, "update", action_key: :action_only) do |action, _version|
+      new_versions[action]
+    end
+  end
+
+  def migrate_tag_to_hash_versions
+    @out.puts "Converting tag-based versions to hash-based versions in #{@workflow_files.size} workflow file(s)..."
+
+    actions = scan_files { |content| @scanner.tag_based(content) }
+
+    if actions.empty?
+      @out.puts "No GitHub Actions with tag-based versions found in specified workflow files."
+      return
+    end
+
+    @out.puts "Found #{actions.size} GitHub Actions with tag-based versions:"
+    actions.each do |action, versions|
+      plural = (versions.size > 1) ? "versions" : "version"
+      @out.puts "  - #{action} (#{versions.size} tag-based #{plural})"
+    end
+
+    @out.puts "\nFetching hash versions for these actions..."
+    hashes = {}
+    actions.each do |action, versions|
+      repo = ActionRef.repo(action)
+      versions.each do |tag|
+        hash_version = @resolver.hash_for_tag(repo, tag)
+        if hash_version
+          hashes[[action, tag]] = hash_version
+          @out.puts "Hash version of #{action}@#{tag}: #{hash_version}"
+        else
+          @out.puts "Warning: Could not determine the hash version of #{action}@#{tag}"
+        end
+      end
+    end
+
+    apply_updates(actions, "migrate", action_key: :action_with_version) do |action, version|
+      hashes[[action, version]]
+    end
+  end
+
+  def find_all_workflow_files
+    workflow_dir = File.join(Dir.pwd, DEFAULT_WORKFLOW_DIR)
+    unless Dir.exist?(workflow_dir)
+      @out.puts "Workflow directory not found at #{workflow_dir}"
+      return []
+    end
+
+    Dir.glob(File.join(workflow_dir, "*.{yml,yaml}")).sort
+  end
+
+  def validate_workflow_files
+    invalid_files = @workflow_files.reject { |file| File.exist?(file) }
+    if invalid_files.any?
+      @out.puts "Error: The following workflow files do not exist:"
+      invalid_files.each { |file| @out.puts "  - #{file}" }
+      exit 1
+    end
+  end
+
+  private
+
+  # Scans every workflow file with the given block and merges the per-file
+  # results into a single { action => [versions] } hash.
+  def scan_files
+    merged = {}
+    @workflow_files.each do |file|
+      content = File.read(file)
+      yield(content).each do |action, versions|
+        (merged[action] ||= Set.new).merge(versions)
+      end
+    rescue => e
+      @out.puts "Error processing #{file}: #{e.message}" if @verbose
+    end
+    merged.transform_values(&:to_a)
+  end
+
+  def apply_updates(actions, operation_type, action_key:, &resolve)
     files_changed = 0
     actions_processed = Hash.new(0)
 
     @workflow_files.each do |file|
       content = File.read(file)
-      file_modified = false
+      new_content, modified, processed = @rewriter.rewrite(content, actions, action_key: action_key, &resolve)
 
-      actions.each do |action, versions|
-        versions.each do |version|
-          cache_key = action_key == :action_only ? action : "#{action}@#{version}"
-          # Skip if we don't have a version for this action
-          next unless @latest_versions_cache.key?(cache_key)
+      processed.each { |action, count| actions_processed[action] += count }
 
-          new_version = @latest_versions_cache[cache_key]
-
-          # Create old and new patterns based on operation type
-          if action_key == :action_only
-            old_pattern = /uses:\s+#{Regexp.escape(action)}@#{Regexp.escape(version)}([ \t]+#[^\r\n]*)?/
-          else
-            old_pattern = "uses: #{action}@#{version}"
-          end
-
-          # Replace old version with new version
-          if content.match?(old_pattern)
-            if action_key == :action_only
-              content = content.gsub(old_pattern) do
-                # The first "# ..." is the version comment owned by this tool.
-                # Preserve any following directives (e.g. "# zizmor: ignore[...]").
-                extra_comment = $1.to_s[/#[^#]*(\s+#[^\r\n]*)/, 1].to_s
-                "uses: #{action}@#{new_version}#{extra_comment}"
-              end
-            else
-              content = content.gsub(old_pattern, "uses: #{action}@#{new_version}")
-            end
-            actions_processed[action] += 1
-            file_modified = true
-          end
-        end
-      end
-
-      if file_modified
-        if dry_run
-          puts "Would #{operation_type}: #{file}"
+      if modified
+        if @dry_run
+          @out.puts "Would #{operation_type}: #{file}"
         else
-          File.write(file, content)
-          puts "#{operation_type.capitalize}d: #{file}"
+          File.write(file, new_content)
+          @out.puts "#{operation_type.capitalize}d: #{file}"
           files_changed += 1
         end
       else
-        puts "No #{operation_type}s needed for: #{file}"
+        @out.puts "No #{operation_type}s needed for: #{file}"
       end
     end
 
     if files_changed > 0
-      operation_past = operation_type == "update" ? "updated" : "migrated"
-      puts "\nSuccessfully #{operation_past} #{files_changed} workflow file(s)"
+      operation_past = (operation_type == "update") ? "updated" : "migrated"
+      @out.puts "\nSuccessfully #{operation_past} #{files_changed} workflow file(s)"
 
       actions_processed.each do |action, count|
-        puts "  - #{action}: #{count} occurrence(s)"
+        @out.puts "  - #{action}: #{count} occurrence(s)"
       end
     else
-      puts "\nNo files were #{operation_type}d" + (dry_run ? " (dry run)" : "")
+      @out.puts "\nNo files were #{operation_type}d" + (@dry_run ? " (dry run)" : "")
     end
   end
 end
 
-options = {}
-OptionParser.new do |opts|
-  opts.banner = "Usage: gh actions-updater [options] [-f workflow_file ...] [-a action ...]"
+# Command-line entry point: parses options and runs the updater.
+module CLI
+  module_function
 
-  opts.on("-f", "--file FILE", "Specify workflow file(s) to update (can be used multiple times, relative or absolute path)") do |file|
-    options[:workflow_files] ||= []
-    # Convert to absolute path if it's relative
-    file_path = File.expand_path(file, Dir.pwd)
-    options[:workflow_files] << file_path
+  def parse(argv)
+    options = {}
+    OptionParser.new do |opts|
+      opts.banner = "Usage: gh actions-updater [options] [-f workflow_file ...] [-a action ...]"
+
+      opts.on("-f", "--file FILE", "Specify workflow file(s) to update (can be used multiple times, relative or absolute path)") do |file|
+        options[:workflow_files] ||= []
+        # Convert to absolute path if it's relative
+        options[:workflow_files] << File.expand_path(file, Dir.pwd)
+      end
+
+      opts.on("-a", "--action ACTION", "Target specific action(s) to update (can be used multiple times, e.g. 'actions/checkout')") do |action|
+        options[:target_actions] ||= []
+        options[:target_actions] << action
+      end
+
+      opts.on("-m", "--migrate", "Convert tag-based versions to hash-based versions") do
+        options[:migrate] = true
+      end
+
+      opts.on("-n", "--dry-run", "Show what would be done without making changes") do
+        options[:dry_run] = true
+      end
+
+      opts.on("-v", "--verbose", "Show more detailed output") do
+        options[:verbose] = true
+      end
+
+      opts.on("-h", "--help", "Show this help message") do
+        puts opts
+        exit
+      end
+    end.parse!(argv)
+    options
   end
 
-  opts.on("-a", "--action ACTION", "Target specific action(s) to update (can be used multiple times, e.g. 'actions/checkout')") do |action|
-    options[:target_actions] ||= []
-    options[:target_actions] << action
+  def run(argv)
+    GitHubActionsUpdater.new(parse(argv)).run
   end
+end
 
-  opts.on("-m", "--migrate", "Convert tag-based versions to hash-based versions") do
-    options[:migrate] = true
-  end
-
-  opts.on("-n", "--dry-run", "Show what would be done without making changes") do
-    options[:dry_run] = true
-  end
-
-  opts.on("-v", "--verbose", "Show more detailed output") do
-    options[:verbose] = true
-  end
-
-  opts.on("-h", "--help", "Show this help message") do
-    puts opts
-    exit
-  end
-end.parse!
-
-updater = GitHubActionsUpdater.new(options)
-
-updater.run
+if $PROGRAM_NAME == __FILE__
+  CLI.run(ARGV)
+end
