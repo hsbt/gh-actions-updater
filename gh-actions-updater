@@ -437,16 +437,23 @@ class GitHubActionsUpdater
 
           # Create old and new patterns based on operation type
           if action_key == :action_only
-            old_pattern = /uses:\s+#{Regexp.escape(action)}@#{Regexp.escape(version)}(?:\s+#\s+[^\r\n]*)?/
+            old_pattern = /uses:\s+#{Regexp.escape(action)}@#{Regexp.escape(version)}([ \t]+#[^\r\n]*)?/
           else
             old_pattern = "uses: #{action}@#{version}"
           end
 
-          new_pattern = "uses: #{action}@#{new_version}"
-
           # Replace old version with new version
           if content.match?(old_pattern)
-            content = content.gsub(old_pattern, new_pattern)
+            if action_key == :action_only
+              content = content.gsub(old_pattern) do
+                # The first "# ..." is the version comment owned by this tool.
+                # Preserve any following directives (e.g. "# zizmor: ignore[...]").
+                extra_comment = $1.to_s[/#[^#]*(\s+#[^\r\n]*)/, 1].to_s
+                "uses: #{action}@#{new_version}#{extra_comment}"
+              end
+            else
+              content = content.gsub(old_pattern, "uses: #{action}@#{new_version}")
+            end
             actions_processed[action] += 1
             file_modified = true
           end
